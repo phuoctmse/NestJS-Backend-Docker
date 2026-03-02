@@ -1,0 +1,54 @@
+# Global ARG for base image version — must be declared before first FROM
+ARG ALPINE_VERSION=3.23
+
+# Build stage
+FROM node:20.20-alpine3.23 AS development
+
+WORKDIR /usr/src/app
+
+COPY package*.json ./
+
+# Improvement #2: combine both RUN npm install into a single layer
+RUN npm install glob rimraf && npm install --include=dev
+
+COPY . .
+
+RUN npm run build
+
+
+# Production stage — pure Alpine base (smaller than node:alpine)
+FROM alpine:${ALPINE_VERSION}
+
+# Improvement #4: add LABEL metadata for maintainability
+LABEL maintainer="yourname@example.com" \
+      version="1.0.0" \
+      description="NestJS production image"
+
+# Improvement #5: create non-root user with explicit UID for deterministic behavior
+RUN adduser -D -u 1001 nestjs
+
+# Install nodejs and npm with --no-cache to avoid leftover cache in this layer
+RUN apk add --no-cache nodejs npm
+
+ARG NODE_ENV=production
+ENV NODE_ENV=${NODE_ENV}
+
+WORKDIR /usr/src/app
+
+COPY package*.json ./
+
+# Improvement #6: use "npm ci --omit=dev" instead of deprecated --production flag
+# npm ci: faster, reproducible installs (respects package-lock.json exactly)
+RUN npm ci --omit=dev
+
+# Improvement #7: remove "COPY . ." — only copy the compiled dist artifact
+COPY --from=development /usr/src/app/dist ./dist
+
+RUN chown -R nestjs:nestjs /usr/src/app
+
+USER nestjs
+
+# Improvement #3: add EXPOSE to document the application port
+EXPOSE 3000
+
+CMD ["node", "dist/main"]
