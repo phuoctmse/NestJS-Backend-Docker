@@ -20,7 +20,7 @@ COPY package*.json ./
 
 RUN npm ci --omit=dev
 
-# Production stage - Distroless (minimal vulnerabilities)
+# Production stage - Distroless
 FROM gcr.io/distroless/nodejs20-debian13:nonroot
 
 WORKDIR /usr/src/app
