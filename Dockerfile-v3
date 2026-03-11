@@ -1,31 +1,18 @@
-# Global ARGs - must be declared before the first FROM to be usable in any FROM instruction
-ARG ALPINE_VERSION=3.23
-ARG NODE_VERSION=20.20
-
 # Build stage
-FROM node:20.20-alpine3.23 AS development
+FROM node:20-alpine AS build
 
 WORKDIR /usr/src/app
 
 COPY package*.json ./
 
-RUN npm install glob rimraf
-
-RUN npm install --include=dev
+RUN npm ci
 
 COPY . .
 
 RUN npm run build
 
-# Production stage
-FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS production
-
-RUN apk upgrade --no-cache
-
-RUN adduser -D nestjs
-
-ARG NODE_ENV=production
-ENV NODE_ENV=${NODE_ENV}
+# Production dependencies stage
+FROM node:20-alpine AS deps
 
 WORKDIR /usr/src/app
 
@@ -33,12 +20,15 @@ COPY package*.json ./
 
 RUN npm ci --omit=dev
 
-COPY . .
+# Production stage - Distroless (minimal vulnerabilities)
+FROM gcr.io/distroless/nodejs20-debian13:nonroot
 
-COPY --from=development /usr/src/app/dist ./dist
+WORKDIR /usr/src/app
 
-RUN chown -R nestjs:nestjs /usr/src/app
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/package.json ./
 
-USER nestjs
+ENV NODE_ENV=production
 
-CMD ["node", "dist/main"]
+CMD ["dist/main"]
