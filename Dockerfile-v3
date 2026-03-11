@@ -22,7 +22,7 @@ FROM alpine:${ALPINE_VERSION}
 
 RUN adduser -D nestjs
 
-RUN apk add --no-cache nodejs npm
+RUN apk upgrade --no-cache && apk add --no-cache nodejs npm
 
 ARG NODE_ENV=production
 ENV NODE_ENV=${NODE_ENV}
