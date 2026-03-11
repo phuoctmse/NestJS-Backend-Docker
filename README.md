@@ -4,23 +4,23 @@ Dự án luyện tập đóng gói ứng dụng **NestJS** bằng **Docker**. Ba
 
 - **`Dockerfile`** — Build cơ bản, một stage
 - **`Dockerfile-v2`** — Multi-stage build, giảm image size
-- **`Dockerfile-v3`** — Alpine thuần + non-root user để tăng bảo mật
-- **`Dockerfile-v4`** — Áp dụng đầy đủ best practice: explicit UID, LABEL, EXPOSE, `npm ci`
+- **`Dockerfile-v3`** — **Distroless** image, ít vulnerabilities nhất, tối ưu bảo mật
+- **`Dockerfile-v4`** — Alpine thuần + đầy đủ best practice: explicit UID, LABEL, EXPOSE, `npm ci`
 
 ---
 
-## � Mục Lục
+## 📋 Mục Lục
 
 - [Cấu Trúc Dự Án](#-cấu-trúc-dự-án)
 - [Dockerfile Cơ Bản](#-dockerfile-cơ-bản-dockerfile)
 - [Dockerfile Tối Ưu (v2)](#-dockerfile-tối-ưu-dockerfile-v2)
-- [Dockerfile Bảo Mật (v3)](#-dockerfile-bảo-mật-dockerfile-v3)
-- [Dockerfile Tối Ưu Nhất (v4)](#-dockerfile-tối-ưu-nhất-dockerfile-v4)
+- [Dockerfile Bảo Mật - Distroless (v3)](#-dockerfile-bảo-mật-dockerfile-v3--distroless)
+- [Dockerfile Best Practice (v4)](#-dockerfile-tối-ưu-nhất-dockerfile-v4)
 - [So Sánh](#-so-sánh)
 - [Chạy Thủ Công](#️-chạy-thủ-công-không-dùng-docker)
 - [Yêu Cầu](#-yêu-cầu)
 - [Best Practice Khi Viết Dockerfile](#-best-practice-khi-viết-dockerfile)
-- [Điểm Có Thể Cải Thiện trong v3](#-những-điểm-có-thể-cải-thiện-trong-dockerfile-v3)
+- [So Sánh Security: Alpine vs Distroless](#-so-sánh-security-alpine-vs-distroless)
 
 ---
 
@@ -32,8 +32,8 @@ NestJS-Backend-Docker/
 │   └── main.ts
 ├── Dockerfile          # Single-stage build cơ bản
 ├── Dockerfile-v2       # Multi-stage build tối ưu
-├── Dockerfile-v3       # Alpine base + non-root user
-├── Dockerfile-v4       # Áp dụng đầy đủ best practice
+├── Dockerfile-v3       # Distroless - ít vulnerabilities nhất
+├── Dockerfile-v4       # Alpine + đầy đủ best practice
 ├── .dockerignore
 └── ...
 ```
@@ -117,61 +117,78 @@ docker run -p 3000:3000 nestjs-app:v2
 
 ---
 
-## 🔐 Dockerfile Bảo Mật (`Dockerfile-v3`)
+## 🔐 Dockerfile Bảo Mật (`Dockerfile-v3`) — Distroless
 
-Xây dựng dựa trên `Dockerfile-v2` với hai cải tiến thêm:
+Sử dụng **Google Distroless** image — image tối giản chỉ chứa runtime, không có shell, package manager hay bất kỳ tool thừa nào.
 
-1. **Alpine thuần** (`alpine`) thay vì `node:alpine` → image nhỏ hơn
-2. **Non-root user** (`nestjs`) → tuân thủ nguyên tắc least privilege
+**Tại sao Distroless?**
+- **Ít vulnerabilities nhất** — không có npm CLI (loại bỏ 11 HIGH CVEs từ npm packages)
+- **Attack surface tối thiểu** — không có shell (`/bin/sh`), package manager (`apt`, `apk`)
+- **Non-root mặc định** — tag `:nonroot` chạy với user không phải root
+- **Nhỏ gọn** — chỉ chứa Node.js runtime và dependencies cần thiết
 
 ```dockerfile
-# Global ARGs phải khai báo trước FROM đầu tiên
-ARG ALPINE_VERSION=3.23
-ARG NODE_VERSION=20.20
-
 # Build stage
-FROM node:20.20-alpine3.23 AS development
+FROM node:20-alpine AS build
 
 WORKDIR /usr/src/app
+
 COPY package*.json ./
-RUN npm install glob rimraf
-RUN npm install --include=dev
+
+RUN npm ci
+
 COPY . .
+
 RUN npm run build
 
-# Production stage — Alpine thuần
-FROM alpine:${ALPINE_VERSION}
-
-RUN adduser -D nestjs
-RUN apk add --no-cache nodejs npm
-
-ARG NODE_ENV=production
-ENV NODE_ENV=${NODE_ENV}
+# Production dependencies stage
+FROM node:20-alpine AS deps
 
 WORKDIR /usr/src/app
+
 COPY package*.json ./
-RUN npm install --production
-COPY . .
-COPY --from=development /usr/src/app/dist ./dist
 
-RUN chown -R nestjs:nestjs /usr/src/app
-USER nestjs
+RUN npm ci --omit=dev
 
-CMD ["node", "dist/main"]
+# Production stage - Distroless (minimal vulnerabilities)
+FROM gcr.io/distroless/nodejs20-debian13:nonroot
+
+WORKDIR /usr/src/app
+
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/package.json ./
+
+ENV NODE_ENV=production
+
+CMD ["dist/main"]
 ```
 
-**Ưu điểm so với v2:**
-- Dùng `alpine` thuần thay vì `node:alpine` → image nhỏ hơn
-- Chạy app bằng **non-root user** (`nestjs`) → bảo mật tốt hơn
-- Global `ARG` cho version base image → dễ quản lý phiên bản
+**Ưu điểm so với Alpine:**
 
-> **Lưu ý:** Trong multi-stage build, `ARG` dùng trong lệnh `FROM` phải khai báo **trước** `FROM` đầu tiên (global scope). Bên trong mỗi stage, `ARG` chỉ có hiệu lực trong stage đó.
+| | Node:Alpine | Distroless |
+|---|-------------|------------|
+| Shell | Có (`/bin/sh`) | **Không** |
+| Package manager | Có (`apk`) | **Không** |
+| npm CLI | Có (nhiều CVEs) | **Không** |
+| HIGH vulnerabilities | ~14 | **~1** |
+| Debug vào container | `docker exec -it ... sh` | Không thể |
+
+> **Lưu ý:** Vì không có shell, bạn không thể `docker exec` vào container để debug. Đây là tính năng bảo mật, không phải hạn chế. Nếu cần debug, hãy dùng logging và monitoring.
 
 ### Build & Chạy
 
 ```bash
 docker build -f Dockerfile-v3 -t nestjs-app:v3 .
 docker run -p 3000:3000 nestjs-app:v3
+```
+
+### Quét Vulnerabilities
+
+```bash
+# Scan với Trivy
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  aquasec/trivy image nestjs-app:v3 --severity HIGH,CRITICAL
 ```
 
 ---
@@ -257,16 +274,17 @@ docker run -p 3000:3000 nestjs-app:v4
 
 | Tính năng | `Dockerfile` | `Dockerfile-v2` | `Dockerfile-v3` | `Dockerfile-v4` |
 |---|---|---|---|---|
-| Số stage | 1 | 2 | 2 | 2 |
-| Base image (production) | `node:alpine` | `node:alpine` | `alpine` | `alpine` |
+| Số stage | 1 | 2 | **3** | 2 |
+| Base image (production) | `node:alpine` | `node:alpine` | **Distroless** | `alpine` |
 | `devDependencies` trong image | ✅ Có | ❌ Không | ❌ Không | ❌ Không |
-| Non-root user | ❌ | ❌ | ✅ | ✅ |
-| Explicit UID | ❌ | ❌ | ❌ | ✅ |
-| `--no-cache` apk | ❌ | ❌ | ✅ | ✅ |
-| `npm ci --omit=dev` | ❌ | ❌ | ❌ | ✅ |
+| Non-root user | ❌ | ❌ | ✅ (built-in) | ✅ |
+| Shell trong image | ✅ | ✅ | **❌ Không** | ✅ |
+| npm CLI trong image | ✅ | ✅ | **❌ Không** | ✅ |
+| `npm ci --omit=dev` | ❌ | ❌ | ✅ | ✅ |
 | `LABEL` metadata | ❌ | ❌ | ❌ | ✅ |
 | `EXPOSE` port | ✅ | ❌ | ❌ | ✅ |
-| **Image size thực tế** | **685.34 MB** | **228.68 MB** | **194.01 MB** | **192.81 MB** |
+| **HIGH vulnerabilities** | ~14 | ~14 | **~1** | ~14 |
+| **Image size thực tế** | **685 MB** | **229 MB** | **~130 MB** | **193 MB** |
 
 ### 📸 Bằng chứng build thực tế
 
@@ -435,30 +453,45 @@ Dùng GitHub Actions hoặc CI/CD pipeline khác để tự động build, tag v
 
 ---
 
-## 🔍 Những Điểm Có Thể Cải Thiện Trong `Dockerfile-v3`
+## 🔍 So Sánh Security: Alpine vs Distroless
 
-`Dockerfile-v3` đã áp dụng nhiều best practice tốt (multi-stage build, Alpine base, `--no-cache`, non-root user). Dưới đây là các điểm còn có thể cải thiện thêm:
+`Dockerfile-v3` (Distroless) được thiết kế với mục tiêu **giảm thiểu vulnerabilities** và **attack surface**.
 
-| # | Vấn đề | Hiện tại | Đề xuất cải tiến |
-|---|---|---|---|
-| 1 | **Image chưa pin bằng digest** | `FROM alpine:3.23` | `FROM alpine:3.23@sha256:...` để build reproducible |
-| 2 | **Hai lệnh `RUN npm install` riêng** | 2 layer riêng | Gộp lại thành 1 `RUN` để giảm số layer |
-| 3 | **Thiếu `EXPOSE`** | Không có | Thêm `EXPOSE 3000` để tài liệu hóa port |
-| 4 | **Thiếu `LABEL` metadata** | Không có | Thêm `LABEL` cho maintainer, version, mô tả |
-| 5 | **UID/GID không xác định** | `adduser -D nestjs` | Dùng UID tường minh: `adduser -D -u 1001 nestjs` |
-| 6 | **`--production` đã deprecated** | `npm install --production` | Dùng `npm ci --omit=dev` để install sạch hơn |
-| 7 | **`COPY . .` dư thừa** | Copy toàn bộ source vào production | Bỏ đi — chỉ cần `dist/` và `package.json` |
+### Kết quả quét Trivy (HIGH/CRITICAL)
+
+| Image | HIGH | CRITICAL | Nguồn chính |
+|-------|------|----------|-------------|
+| Node:Alpine | 14 | 0 | npm CLI packages (tar, minimatch, glob, cross-spawn) |
+| **Distroless** | **1** | **0** | OS lib (libc6 - chưa có fix) |
+
+### Tại sao Distroless ít vulnerabilities hơn?
+
+1. **Không có npm CLI** — loại bỏ 11 CVEs từ các packages như `tar`, `minimatch`, `glob`, `cross-spawn`
+2. **Không có shell** — không thể bị khai thác qua shell injection
+3. **Không có package manager** — không có `apt`, `apk` để attacker cài thêm tools
+4. **Image tối giản** — chỉ có những gì cần thiết để chạy Node.js
+
+### Trade-offs
+
+| | Alpine | Distroless |
+|---|--------|------------|
+| Debug vào container | ✅ `docker exec -it ... sh` | ❌ Không thể |
+| Cài thêm packages | ✅ `apk add ...` | ❌ Không thể |
+| Vulnerabilities | Nhiều hơn | **Ít hơn** |
+| Phù hợp cho | Development, staging | **Production** |
 
 ---
 
 ### Tổng Kết
 
-| Best Practice | v1 | v2 | v3 |
-|---|---|---|---|
-| Multi-stage build | ❌ | ✅ | ✅ |
-| Base image nhỏ (`alpine`) | ✅ | ✅ | ✅✅ |
-| Tận dụng layer cache | ✅ | ✅ | ✅ |
-| Non-root user | ❌ | ❌ | ✅ |
-| Không có devDependencies | ❌ | ✅ | ✅ |
-| `--no-cache` cho apk | ❌ | ❌ | ✅ |
-| **Image size thực tế** | **685 MB** | **229 MB** | **200 MB** |
+| Best Practice | v1 | v2 | v3 (Distroless) | v4 |
+|---|---|---|---|---|
+| Multi-stage build | ❌ | ✅ | ✅ | ✅ |
+| Base image tối giản | ❌ | ❌ | **✅✅** | ✅ |
+| Non-root user | ❌ | ❌ | ✅ | ✅ |
+| Không có devDependencies | ❌ | ✅ | ✅ | ✅ |
+| Không có shell | ❌ | ❌ | **✅** | ❌ |
+| Không có npm CLI | ❌ | ❌ | **✅** | ❌ |
+| `npm ci --omit=dev` | ❌ | ❌ | ✅ | ✅ |
+| **HIGH vulnerabilities** | ~14 | ~14 | **~1** | ~14 |
+| **Image size** | **685 MB** | **229 MB** | **~130 MB** | **193 MB** |
